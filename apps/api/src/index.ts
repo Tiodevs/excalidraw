@@ -32,6 +32,8 @@ await app.register(cors, {
     }
     callback(null, false);
   },
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 });
 
 await app.register(rateLimit, {
