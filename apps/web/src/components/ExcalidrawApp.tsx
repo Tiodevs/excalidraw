@@ -29,19 +29,26 @@ import { formatRelativeDate } from "@/lib/dates";
 
 type SaveState = "saved" | "saving" | "error";
 
+const CANVAS_ACTIONS = {
+  canvasActions: {
+    loadScene: true,
+    saveToActiveFile: true,
+    export: { saveFileToDisk: true },
+    toggleTheme: true,
+  },
+} as const;
+
 function serializeScene(
   elements: unknown,
   appState: unknown,
   files: unknown,
 ) {
-  return JSON.parse(
-    serializeAsJSON(
-      elements as Parameters<typeof serializeAsJSON>[0],
-      appState as Parameters<typeof serializeAsJSON>[1],
-      files as Parameters<typeof serializeAsJSON>[2],
-      "local",
-    ),
-  ) as Record<string, unknown>;
+  return serializeAsJSON(
+    elements as Parameters<typeof serializeAsJSON>[0],
+    appState as Parameters<typeof serializeAsJSON>[1],
+    files as Parameters<typeof serializeAsJSON>[2],
+    "database",
+  );
 }
 
 export default function ExcalidrawApp() {
@@ -51,9 +58,15 @@ export default function ExcalidrawApp() {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
-  const skipSaveUntilRef = useRef(0);
+  const currentIdRef = useRef<string | null>(null);
+  const lastSavedJsonRef = useRef("");
+  const pendingJsonRef = useRef("");
+  const primedRef = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const libraryTimer = useRef<number | null>(null);
+  const libraryApiRef = useRef<ExcalidrawImperativeAPI | null>(null);
+
+  currentIdRef.current = current?.id ?? null;
 
   const initialData = useMemo(() => {
     if (!current) return null;
@@ -106,8 +119,9 @@ export default function ExcalidrawApp() {
         if (cancelled) return;
         setDrawings([created.drawing]);
         setCurrent(created.drawing);
+        primedRef.current = false;
+        lastSavedJsonRef.current = "";
         setBootstrapping(false);
-        skipSaveUntilRef.current = Date.now() + 1000;
         return;
       }
 
@@ -121,7 +135,8 @@ export default function ExcalidrawApp() {
       window.localStorage.setItem("excalidraw.lastDrawingId", drawing.id);
       setDrawings(list);
       setCurrent(drawing);
-      skipSaveUntilRef.current = Date.now() + 1000;
+      primedRef.current = false;
+      lastSavedJsonRef.current = "";
       setBootstrapping(false);
     }
 
@@ -140,28 +155,49 @@ export default function ExcalidrawApp() {
     if (current?.id === id) return;
     const { drawing } = await fetchDrawing(id);
     window.localStorage.setItem("excalidraw.lastDrawingId", drawing.id);
-    skipSaveUntilRef.current = Date.now() + 1000;
+    primedRef.current = false;
+    lastSavedJsonRef.current = "";
     setCurrent(drawing);
     setSaveState("saved");
   }, [current?.id]);
 
   const handleChange = useCallback(
     (elements: unknown, appState: unknown, files: unknown) => {
-      if (!current || Date.now() < skipSaveUntilRef.current) return;
-      setSaveState("saving");
+      const drawingId = currentIdRef.current;
+      if (!drawingId) return;
+
+      const payload = serializeScene(elements, appState, files);
+      pendingJsonRef.current = payload;
+
+      if (!primedRef.current) {
+        lastSavedJsonRef.current = payload;
+        primedRef.current = true;
+        return;
+      }
+
+      if (payload === lastSavedJsonRef.current) {
+        return;
+      }
+
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(async () => {
+        const toSave = pendingJsonRef.current;
+        const id = currentIdRef.current;
+        if (!id || toSave === lastSavedJsonRef.current) {
+          return;
+        }
+
+        setSaveState("saving");
         try {
-          const data = serializeScene(elements, appState, files);
-          const { drawing } = await updateDrawing(current.id, { data });
+          const { drawing } = await updateDrawing(id, {
+            data: JSON.parse(toSave) as Record<string, unknown>,
+          });
+          lastSavedJsonRef.current = toSave;
           setDrawings((items) =>
             items
               .map((item) =>
                 item.id === drawing.id
-                  ? {
-                      ...item,
-                      updatedAt: drawing.updatedAt,
-                    }
+                  ? { ...item, updatedAt: drawing.updatedAt }
                   : item,
               )
               .sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt)),
@@ -170,9 +206,9 @@ export default function ExcalidrawApp() {
         } catch {
           setSaveState("error");
         }
-      }, 1200);
+      }, 1000);
     },
-    [current],
+    [],
   );
 
   const handleLibraryChange = useCallback((items: LibraryItems) => {
@@ -185,7 +221,8 @@ export default function ExcalidrawApp() {
   const handleNewDrawing = useCallback(async () => {
     const { drawing } = await createDrawing("Sem título");
     setDrawings((items) => [drawing, ...items]);
-    skipSaveUntilRef.current = Date.now() + 1000;
+    primedRef.current = false;
+    lastSavedJsonRef.current = "";
     setCurrent(drawing);
     window.localStorage.setItem("excalidraw.lastDrawingId", drawing.id);
     setSaveState("saved");
@@ -219,6 +256,30 @@ export default function ExcalidrawApp() {
     [current?.id, drawings, handleNewDrawing, openDrawing],
   );
 
+  const handleApiReady = useCallback(
+    (api: ExcalidrawImperativeAPI) => {
+      apiRef.current = api;
+      if (libraryApiRef.current === api) return;
+      libraryApiRef.current = api;
+      void loadLibrary(api);
+    },
+    [loadLibrary],
+  );
+
+  const renderTopRightUI = useCallback(() => {
+    return (
+      <div
+        className={`save-pill${saveState === "saving" ? " is-saving" : ""}${saveState === "error" ? " is-error" : ""}`}
+      >
+        {saveState === "saving"
+          ? "Salvando…"
+          : saveState === "error"
+            ? "Erro ao salvar"
+            : "Salvo na nuvem"}
+      </div>
+    );
+  }, [saveState]);
+
   if (bootstrapping || !current) {
     return (
       <div className="app-loading">
@@ -236,29 +297,11 @@ export default function ExcalidrawApp() {
         isCollaborating={false}
         name={current.name}
         initialData={initialData}
-        UIOptions={{
-          canvasActions: {
-            loadScene: true,
-            saveToActiveFile: true,
-            export: { saveFileToDisk: true },
-            toggleTheme: true,
-          },
-        }}
-        excalidrawAPI={(api) => {
-          apiRef.current = api;
-          void loadLibrary(api);
-        }}
+        UIOptions={CANVAS_ACTIONS}
+        excalidrawAPI={handleApiReady}
         onChange={handleChange}
         onLibraryChange={handleLibraryChange}
-        renderTopRightUI={() => (
-          <div className={`save-pill${saveState === "saving" ? " is-saving" : ""}${saveState === "error" ? " is-error" : ""}`}>
-            {saveState === "saving"
-              ? "Salvando…"
-              : saveState === "error"
-                ? "Erro ao salvar"
-                : "Salvo na nuvem"}
-          </div>
-        )}
+        renderTopRightUI={renderTopRightUI}
       >
         <MainMenu>
           <MainMenu.DefaultItems.LoadScene />
