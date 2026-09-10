@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lousa
+      POSTGRES_PASSWORD: lousa
+      POSTGRES_DB: lousa
+    ports:
+      - "5432:5432"
+    volumes:
+      - lousa_pg:/var/lib/postgresql/data
+
+volumes:
+  lousa_pg:
